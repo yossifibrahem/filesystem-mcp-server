@@ -24,6 +24,8 @@ function resolvePath(filePath: string): string {
 }
 
 /** Read directory listing up to 2 levels deep */
+const IGNORED = new Set(["node_modules", "dist", "build"]);
+
 function listDirectory(dirPath: string, depth = 0, maxDepth = 2): string {
   if (depth > maxDepth) return "";
   const indent = "  ".repeat(depth);
@@ -31,6 +33,7 @@ function listDirectory(dirPath: string, depth = 0, maxDepth = 2): string {
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
 
   for (const entry of entries) {
+    if (entry.name.startsWith(".") || IGNORED.has(entry.name)) continue;
     output += `${indent}${entry.isDirectory() ? "📁" : "📄"} ${entry.name}\n`;
     if (entry.isDirectory() && depth < maxDepth) {
       output += listDirectory(path.join(dirPath, entry.name), depth + 1, maxDepth);
