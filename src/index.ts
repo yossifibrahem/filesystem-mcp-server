@@ -184,10 +184,11 @@ Examples:
       // Report which line the change landed on
       const linesBefore = original.slice(0, original.indexOf(old_str)).split("\n").length;
       const linesAdded = (new_str ?? "").split("\n").length;
+      const linesRemoved = old_str.split("\n").length;
 
       return {
-        content: [{ type: "text" as const, text: `✅ Edit applied at line ${linesBefore} in ${resolved} (+${linesAdded} lines)` }],
-        structuredContent: { path: resolved, line: linesBefore, linesAdded },
+        content: [{ type: "text" as const, text: `✅ Edit applied at line ${linesBefore} in ${resolved} (+${linesAdded}/-${linesRemoved} lines)` }],
+        structuredContent: { path: resolved, line: linesBefore, linesAdded, linesRemoved },
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
