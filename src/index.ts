@@ -182,20 +182,12 @@ Examples:
       fs.writeFileSync(resolved, updated, "utf8");
 
       // Report which line the change landed on
-      const editStartLine = original.slice(0, original.indexOf(old_str)).split("\n").length;
-      const linesRemoved = old_str.split("\n").length;
+      const linesBefore = original.slice(0, original.indexOf(old_str)).split("\n").length;
       const linesAdded = (new_str ?? "").split("\n").length;
 
-      // Build a unified-diff-style snippet
-      const removedLines = old_str.split("\n").map((l) => `- ${l}`).join("\n");
-      const addedLines = (new_str ?? "").split("\n").map((l) => `+ ${l}`).join("\n");
-      const diffSnippet = [removedLines, addedLines].filter(Boolean).join("\n");
-
-      const summary = `✅ Edit applied at line ${editStartLine} in ${resolved} (-${linesRemoved} / +${linesAdded} lines)\n\`\`\`diff\n${diffSnippet}\n\`\`\``;
-
       return {
-        content: [{ type: "text" as const, text: summary }],
-        structuredContent: { path: resolved, line: editStartLine, linesRemoved, linesAdded },
+        content: [{ type: "text" as const, text: `✅ Edit applied at line ${linesBefore} in ${resolved} (+${linesAdded} lines)` }],
+        structuredContent: { path: resolved, line: linesBefore, linesAdded },
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
