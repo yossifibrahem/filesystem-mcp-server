@@ -31,7 +31,6 @@ function listDirectory(dirPath: string, depth = 0, maxDepth = 2): string {
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
     output += `${indent}${entry.isDirectory() ? "📁" : "📄"} ${entry.name}\n`;
     if (entry.isDirectory() && depth < maxDepth) {
       output += listDirectory(path.join(dirPath, entry.name), depth + 1, maxDepth);
@@ -83,7 +82,7 @@ Error Handling:
       path: z
         .string()
         .min(1, "Path must not be empty")
-        .describe("Absolute or relative file path to write to"),
+        .describe("Absolute path, relative path, or ~/path to write to"),
       content: z
         .string()
         .describe("Full content to write into the file"),
@@ -151,7 +150,7 @@ Error Handling:
       path: z
         .string()
         .min(1, "Path must not be empty")
-        .describe("Absolute or relative path of the file to edit"),
+        .describe("Absolute path, relative path, or ~/path to edit"),
       old_str: z
         .string()
         .min(1, "old_str must not be empty")
@@ -232,8 +231,10 @@ server.registerTool(
 or list the contents of a directory up to 2 levels deep.
 
 For text files, output includes line numbers prefixed to each line for easy reference.
+Large files (>16 000 chars) are automatically truncated in the middle — the beginning and
+end are shown with an omission notice; use view_range to read the hidden section.
 For images (jpg, jpeg, png, gif, webp), the raw base64 data URL is returned.
-For directories, a tree view (📁/📄) is returned, excluding hidden files and node_modules.
+For directories, a tree view (📁/📄) is returned, including hidden files and node_modules.
 
 Args:
   - path (string): Absolute or relative path to a file or directory.
@@ -260,7 +261,7 @@ Error Handling:
       path: z
         .string()
         .min(1, "Path must not be empty")
-        .describe("Absolute or relative path to a file or directory"),
+        .describe("Absolute path, relative path, or ~/path to a file or directory"),
       view_range: z
         .tuple([z.number().int(), z.number().int()])
         .optional()
@@ -327,8 +328,9 @@ Error Handling:
       }
 
       // Text files
-      const content = fs.readFileSync(resolved, "utf8");
-      const totalLines = content.split("\n").length;
+      const CHAR_LIMIT = 16000;
+      const rawContent = fs.readFileSync(resolved, "utf8");
+      const totalLines = rawContent.split("\n").length;
       let startLine: number | undefined;
       let endLine: number | undefined;
 
@@ -337,10 +339,35 @@ Error Handling:
         endLine = view_range[1] === -1 ? totalLines : view_range[1];
       }
 
-      const numbered = formatWithLineNumbers(content, startLine, endLine);
+      const sliced = startLine || endLine
+        ? formatWithLineNumbers(rawContent, startLine, endLine)
+        : null;
+
+      // Apply mid-truncation when no range is specified and content is large
+      let numbered: string;
+      let truncated = false;
+      if (sliced !== null) {
+        numbered = sliced;
+      } else if (rawContent.length <= CHAR_LIMIT) {
+        numbered = formatWithLineNumbers(rawContent);
+      } else {
+        const halfLimit = Math.floor(CHAR_LIMIT / 2);
+        const headContent = rawContent.slice(0, halfLimit);
+        const tailContent = rawContent.slice(-halfLimit);
+        const headLines = headContent.split("\n").length;
+        const tailStartLine = totalLines - tailContent.split("\n").length + 1;
+        numbered =
+          formatWithLineNumbers(rawContent, 1, headLines) +
+          `\n\n... [${totalLines - headLines - (totalLines - tailStartLine + 1)} lines omitted — use view_range to read them] ...\n\n` +
+          formatWithLineNumbers(rawContent, tailStartLine, totalLines);
+        truncated = true;
+      }
+
       const rangeNote =
         startLine && endLine
           ? ` (lines ${startLine}–${endLine} of ${totalLines})`
+          : truncated
+          ? ` (${totalLines} lines, truncated — middle omitted)`
           : ` (${totalLines} lines)`;
 
       return {
@@ -354,6 +381,7 @@ Error Handling:
           type: "file",
           path: resolved,
           totalLines,
+          truncated,
           startLine: startLine ?? 1,
           endLine: endLine ?? totalLines,
         },
