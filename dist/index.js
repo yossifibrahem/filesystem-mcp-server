@@ -242,20 +242,21 @@ server.registerTool("files_read", {
 or list the contents of a directory up to 2 levels deep.
 
 For text files, output includes line numbers prefixed to each line for easy reference.
+Non-UTF-8 bytes are rendered as hex escapes (e.g. \x84) rather than erroring.
 Large files (>16 000 chars) are automatically truncated in the middle — the beginning and
 end are shown with an omission notice; use view_range to read the hidden section.
-For images (jpg, jpeg, png, gif, webp), the raw base64 data URL is returned.
+For images (jpg, jpeg, png, gif, webp), an image content block is returned for rendering.
 For directories, a tree view (📁/📄) is returned, including hidden files and node_modules.
 
 Args:
   - path (string): Absolute or relative path to a file or directory.
   - view_range (array of 2 integers, optional): [start_line, end_line] to read a slice
     of a text file. Use -1 for end_line to read to the end of the file.
-    Line numbers are 1-indexed. Only valid when path points to a file.
+    Line numbers are 1-indexed. Ignored when path points to a directory.
 
 Returns:
-  For files: numbered line content (full or sliced).
-  For images: data URL string.
+  For text files: numbered line content (full, sliced, or mid-truncated).
+  For images: a rendered image content block.
   For directories: indented tree listing up to 2 levels deep.
   Or an error message if the path does not exist or cannot be read.
 
@@ -322,8 +323,9 @@ Error Handling:
             return {
                 content: [
                     {
-                        type: "text",
-                        text: `data:${imageTypes[ext]};base64,${b64}`,
+                        type: "image",
+                        data: b64,
+                        mimeType: imageTypes[ext],
                     },
                 ],
                 structuredContent: { type: "image", path: resolved, mimeType: imageTypes[ext] },
@@ -331,7 +333,13 @@ Error Handling:
         }
         // Text files
         const CHAR_LIMIT = 16000;
-        const rawContent = fs.readFileSync(resolved, "utf8");
+        const rawBuffer = fs.readFileSync(resolved);
+        const rawContent = Array.from(rawBuffer).map((byte) => {
+            if (byte < 0x80)
+                return String.fromCharCode(byte);
+            const char = Buffer.from([byte]).toString("utf8");
+            return char === "\uFFFD" ? "\\x" + byte.toString(16).padStart(2, "0") : char;
+        }).join("");
         const totalLines = rawContent.split("\n").length;
         let startLine;
         let endLine;
