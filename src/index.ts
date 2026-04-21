@@ -34,7 +34,7 @@ function listDirectory(dirPath: string, depth = 0, maxDepth = 2): string {
 
   for (const entry of entries) {
     if (entry.name.startsWith(".") || IGNORED.has(entry.name)) continue;
-    output += `${indent}${entry.isDirectory() ? "📁" : "📄"} ${entry.name}\n`;
+    output += `${indent}${entry.isDirectory() ? "[dir]" : "[file]"} ${entry.name}\n`;
     if (entry.isDirectory() && depth < maxDepth) {
       output += listDirectory(path.join(dirPath, entry.name), depth + 1, maxDepth);
     }
@@ -95,7 +95,7 @@ Examples:
 
       const bytes = Buffer.byteLength(content, "utf8");
       return {
-        content: [{ type: "text" as const, text: `✅ File written: ${resolved} (${bytes} bytes)` }],
+        content: [{ type: "text" as const, text: `File written: ${resolved} (${bytes} bytes)` }],
         structuredContent: { path: resolved, bytes },
       };
     } catch (err) {
@@ -190,7 +190,7 @@ Examples:
       const linesRemoved = old_str.split("\n").length;
 
       return {
-        content: [{ type: "text" as const, text: `✅ Edit applied at line ${linesBefore} in ${resolved} (+${linesAdded}/-${linesRemoved} lines)` }],
+        content: [{ type: "text" as const, text: `Edit applied at line ${linesBefore} in ${resolved} (+${linesAdded}/-${linesRemoved} lines)` }],
         structuredContent: { path: resolved, line: linesBefore, linesAdded, linesRemoved },
       };
     } catch (err) {
@@ -261,7 +261,7 @@ Examples:
           content: [
             {
               type: "text" as const,
-              text: `📁 Directory: ${resolved}\n\n${listing || "(empty directory)"}`,
+              text: `Directory: ${resolved}\n\n${listing || "(empty directory)"}`,
             },
           ],
           structuredContent: { type: "directory", path: resolved },
@@ -345,7 +345,7 @@ Examples:
         content: [
           {
             type: "text" as const,
-            text: `📄 File: ${resolved}${rangeNote}\n\n${numbered}`,
+            text: `File: ${resolved}${rangeNote}\n\n${numbered}`,
           },
         ],
         structuredContent: {
