@@ -56,28 +56,18 @@ server.registerTool(
   "files_write",
   {
     title: "Write File",
-    description: `Create a new file or overwrite an existing file with the given content.
-
-Automatically creates any missing parent directories. If the file already exists,
-it will be completely overwritten — use files_edit for partial updates.
+    description: `Create or overwrite a file with the given content. Missing parent directories are created automatically.
 
 Args:
-  - path (string): Absolute or relative path where the file should be written.
-                   Example: "/home/user/project/main.ts" or "src/utils.ts"
-  - content (string): Full content to write to the file.
+  - path: File to write to (absolute, relative, or ~/path).
+  - content: Full file content.
 
-Returns:
-  A success message with the resolved absolute path and byte count written,
-  or an error message if the write failed.
+Returns the resolved path and byte count, or an error if the write failed.
+For partial updates use files_edit.
 
 Examples:
-  - Use when: "Create a new config.json" -> path="config.json", content="{}"
-  - Use when: "Save this script as run.sh" -> path="run.sh", content="#!/bin/bash..."
-  - Don't use when: You only need to update part of a file (use files_edit instead)
-
-Error Handling:
-  - Returns "Error: Permission denied" if the path is not writable
-  - Returns "Error: ..." with the OS error message for other failures`,
+  - path="src/index.ts", content="console.log('hello')"
+  - path="~/project/config.json", content="{}"`,
     inputSchema: {
       path: z
         .string()
@@ -121,31 +111,19 @@ server.registerTool(
   "files_edit",
   {
     title: "Edit File (Find & Replace)",
-    description: `Replace a unique substring within an existing file with new content.
-
-The old_str must match the raw file contents exactly (including whitespace and newlines)
-and must appear exactly once — if it appears zero or more than once the operation fails
-to prevent unintended edits. To delete content, pass an empty string for new_str.
+    description: `Find and replace a unique substring in an existing file. old_str must match the file contents exactly and appear exactly once. Omit new_str to delete the match.
 
 Args:
-  - path (string): Absolute or relative path to the file to edit.
-  - old_str (string): The exact substring to search for. Must appear exactly once.
-  - new_str (string, optional): The replacement text. Defaults to "" (deletion).
+  - path: File to edit (absolute, relative, or ~/path).
+  - old_str: Exact substring to find (must appear exactly once).
+  - new_str: Replacement text (default: "" to delete).
 
-Returns:
-  A success message with the resolved path and line range affected,
-  or an error message if the match was not found or was ambiguous.
+Returns the resolved path and line number of the edit, or an error if not found, ambiguous, or file missing.
+For new files use files_write.
 
 Examples:
-  - Use when: "Fix a typo in utils.ts" -> old_str="fucntion", new_str="function"
-  - Use when: "Remove the debug line" -> old_str="console.log('debug')\n", new_str=""
-  - Don't use when: You want to create a new file (use files_write instead)
-  - Don't use when: The string appears in multiple locations (narrow it down with more context)
-
-Error Handling:
-  - Returns "Error: String not found" if old_str has zero matches
-  - Returns "Error: String appears N times" if old_str matches more than once
-  - Returns "Error: File not found" if the path does not exist`,
+  - old_str="fucntion", new_str="function"
+  - old_str="console.log('debug')\n", new_str="" (deletion)`,
     inputSchema: {
       path: z
         .string()
@@ -227,37 +205,19 @@ server.registerTool(
   "files_read",
   {
     title: "Read Path (File or Directory)",
-    description: `Read the contents of a file with optional line-number filtering,
-or list the contents of a directory up to 2 levels deep.
-
-For text files, output includes line numbers prefixed to each line for easy reference.
-Non-UTF-8 bytes are rendered as hex escapes (e.g. \x84) rather than erroring.
-Large files (>16 000 chars) are automatically truncated in the middle — the beginning and
-end are shown with an omission notice; use view_range to read the hidden section.
-For images (jpg, jpeg, png, gif, webp), an image content block is returned for rendering.
-For directories, a tree view (📁/📄) is returned, including hidden files and node_modules.
+    description: `Read a file or list a directory tree (2 levels deep, including hidden files).
 
 Args:
-  - path (string): Absolute or relative path to a file or directory.
-  - view_range (array of 2 integers, optional): [start_line, end_line] to read a slice
-    of a text file. Use -1 for end_line to read to the end of the file.
-    Line numbers are 1-indexed. Ignored when path points to a directory.
+  - path: File or directory to read (absolute, relative, or ~/path).
+  - view_range: Optional [start_line, end_line] slice for text files. Use -1 for end of file. Ignored for directories.
 
-Returns:
-  For text files: numbered line content (full, sliced, or mid-truncated).
-  For images: a rendered image content block.
-  For directories: indented tree listing up to 2 levels deep.
-  Or an error message if the path does not exist or cannot be read.
+Returns numbered line content for text files, an image content block for images (jpg/png/gif/webp), or a tree listing for directories.
+Large text files (>16 000 chars) are mid-truncated with an omission notice — use view_range to reach hidden lines.
+Non-UTF-8 bytes are shown as hex escapes (e.g. \x84).
 
 Examples:
-  - Use when: "Show me the content of main.ts" -> path="src/main.ts"
-  - Use when: "What's on lines 10-25 of config.json?" -> path="config.json", view_range=[10,25]
-  - Use when: "List the project structure" -> path="/home/user/project"
-  - Don't use when: You need to write or modify a file (use files_write or files_edit)
-
-Error Handling:
-  - Returns "Error: Path not found" if path does not exist
-  - Returns "Error: Unsupported binary file" for non-image binary files`,
+  - path="src/index.ts", view_range=[1, 50]
+  - path="~/project" (directory listing)`,
     inputSchema: {
       path: z
         .string()
