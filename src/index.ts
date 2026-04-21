@@ -15,9 +15,12 @@ const server = new McpServer({
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Resolve and ensure path is absolute */
+/** Resolve and ensure path is absolute, expanding ~/ to the home directory */
 function resolvePath(filePath: string): string {
-  return path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath);
+  const expanded = filePath.startsWith("~/")
+    ? path.join(process.env.HOME ?? process.env.USERPROFILE ?? "~", filePath.slice(2))
+    : filePath;
+  return path.isAbsolute(expanded) ? expanded : path.resolve(process.cwd(), expanded);
 }
 
 /** Read directory listing up to 2 levels deep */
