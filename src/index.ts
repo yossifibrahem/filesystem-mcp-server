@@ -3,8 +3,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { z } from "zod";
+
+// ─── Working directory ────────────────────────────────────────────────────────
+
+/**
+ * Default base for resolving relative paths.  We use ~/.wd so the server
+ * always operates from a predictable, user-owned directory.
+ */
+const DEFAULT_CWD = path.join(os.homedir(), ".wd");
+fs.mkdirSync(DEFAULT_CWD, { recursive: true });
 
 // ─── Server Setup ────────────────────────────────────────────────────────────
 
@@ -20,7 +30,7 @@ function resolvePath(filePath: string): string {
   const expanded = filePath.startsWith("~/")
     ? path.join(process.env.HOME ?? process.env.USERPROFILE ?? "~", filePath.slice(2))
     : filePath;
-  return path.isAbsolute(expanded) ? expanded : path.resolve(process.cwd(), expanded);
+  return path.isAbsolute(expanded) ? expanded : path.resolve(DEFAULT_CWD, expanded);
 }
 
 /** Read directory listing up to 2 levels deep */
