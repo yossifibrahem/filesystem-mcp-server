@@ -7,7 +7,9 @@ import * as os from "os";
 import * as path from "path";
 import { z } from "zod";
 
-/** Expand ~/  to the user's home directory, matching shell behaviour on the host machine. */
+// ─── Path helpers ─────────────────────────────────────────────────────────────
+
+/** Expand ~/ to the user's home directory, matching shell behaviour on the host machine. */
 function resolvePath(filePath: string): string {
   if (filePath === "~" || filePath.startsWith("~/")) {
     return path.join(os.homedir(), filePath.slice(1));
@@ -15,14 +17,14 @@ function resolvePath(filePath: string): string {
   return filePath;
 }
 
-// ─── Server Setup ────────────────────────────────────────────────────────────
+// ─── Server Setup ─────────────────────────────────────────────────────────────
 
 const server = new McpServer({
   name: "filesystem-mcp-server",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const IGNORED = new Set(["node_modules"]);
 
@@ -72,14 +74,92 @@ function formatWithLineNumbers(lines: string[], startIdx: number, endIdx: number
     .join("\n");
 }
 
-// ─── Tool: create_file ───────────────────────────────────────────────────────
+/**
+ * Decode a Buffer to a string, replacing invalid UTF-8 bytes with \xNN hex escapes.
+ *
+ * Properly handles multi-byte UTF-8 sequences:
+ *   valid sequences    → rendered as-is
+ *   invalid bytes      → \xNN  (lowercase hex, zero-padded to 2 digits)
+ *
+ * Handles:
+ *   - Orphaned continuation bytes (0x80–0xBF without a leading byte)
+ *   - Invalid leading bytes (0xF8–0xFF)
+ *   - Truncated sequences (leading byte but not enough continuation bytes)
+ *   - Overlong/surrogate encodings (Node decodes them as U+FFFD)
+ *
+ * This matches Claude's `view` tool output exactly.
+ */
+function decodeUtf8WithHexEscapes(buffer: Buffer): string {
+  let result = "";
+  let i = 0;
+
+  while (i < buffer.length) {
+    const b0 = buffer[i];
+
+    // ASCII (single byte, bit 7 = 0)
+    if ((b0 & 0x80) === 0) {
+      result += String.fromCharCode(b0);
+      i++;
+      continue;
+    }
+
+    // Determine expected multi-byte sequence length from leading byte
+    let seqLen: number;
+    if      ((b0 & 0xE0) === 0xC0) { seqLen = 2; }
+    else if ((b0 & 0xF0) === 0xE0) { seqLen = 3; }
+    else if ((b0 & 0xF8) === 0xF0) { seqLen = 4; }
+    else {
+      // Orphaned continuation byte (0x80–0xBF) or out-of-range byte (0xF8–0xFF)
+      result += "\\x" + b0.toString(16).padStart(2, "0");
+      i++;
+      continue;
+    }
+
+    // Truncated sequence (not enough bytes remaining in buffer)
+    if (i + seqLen > buffer.length) {
+      result += "\\x" + b0.toString(16).padStart(2, "0");
+      i++;
+      continue;
+    }
+
+    // All continuation bytes must match 0x80–0xBF (top two bits = 10)
+    let valid = true;
+    for (let j = 1; j < seqLen; j++) {
+      if ((buffer[i + j] & 0xC0) !== 0x80) {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) {
+      result += "\\x" + b0.toString(16).padStart(2, "0");
+      i++;
+      continue;
+    }
+
+    // Decode the complete sequence
+    const decoded = buffer.subarray(i, i + seqLen).toString("utf8");
+
+    // Node still emits U+FFFD for overlong encodings or surrogate code points
+    if (decoded.includes("\uFFFD")) {
+      result += "\\x" + b0.toString(16).padStart(2, "0");
+      i++;
+    } else {
+      result += decoded;
+      i += seqLen;
+    }
+  }
+
+  return result;
+}
+
+// ─── Tool: create_file ────────────────────────────────────────────────────────
 
 server.registerTool(
   "create_file",
   {
     title: "Create File",
-    // Exact description from Claude's create_file tool
-    description: "Create a new file with content in the container. Missing parent directories are created automatically.",
+    description:
+      "Create a new file with content in the container. Missing parent directories are created automatically.",
     inputSchema: {
       description: z
         .string()
@@ -100,8 +180,8 @@ server.registerTool(
   },
   async ({ path: rawPath, file_text }) => {
     const filePath = resolvePath(rawPath);
+
     try {
-      // Exact error message from Claude's create_file tool
       if (fs.existsSync(filePath)) {
         return {
           content: [{ type: "text" as const, text: `File already exists: ${filePath}` }],
@@ -112,7 +192,6 @@ server.registerTool(
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, file_text, "utf8");
 
-      // Exact success message from Claude's create_file tool
       return {
         content: [{ type: "text" as const, text: `File created successfully: ${filePath}` }],
         structuredContent: { path: filePath },
@@ -127,13 +206,12 @@ server.registerTool(
   }
 );
 
-// ─── Tool: str_replace ───────────────────────────────────────────────────────
+// ─── Tool: str_replace ────────────────────────────────────────────────────────
 
 server.registerTool(
   "str_replace",
   {
     title: "Edit File (str_replace)",
-    // Exact description from Claude's str_replace tool
     description:
       "Replace a unique string in a file with another string. old_str must match the raw file content exactly and appear exactly once. When copying from view output, do NOT include the line number prefix (spaces + line number + tab) — it is display-only. View the file immediately before editing; after any successful str_replace, earlier view output of that file in your context is stale — re-view before further edits to the same file.",
     inputSchema: {
@@ -160,7 +238,7 @@ server.registerTool(
   },
   async ({ path: rawPath, old_str, new_str }) => {
     const filePath = resolvePath(rawPath);
-    // Exact error message from Claude's str_replace tool
+
     if (!fs.existsSync(filePath)) {
       return {
         content: [{ type: "text" as const, text: `File not found: ${filePath}` }],
@@ -172,7 +250,6 @@ server.registerTool(
       const original = fs.readFileSync(filePath, "utf8");
       const occurrences = original.split(old_str).length - 1;
 
-      // Exact error messages from Claude's str_replace tool
       if (occurrences === 0) {
         return {
           content: [
@@ -197,10 +274,11 @@ server.registerTool(
         };
       }
 
-      const updated = original.replace(old_str, new_str ?? "");
+      // Exactly one occurrence — use a replacer function to avoid special `$` patterns
+      // in new_str being interpreted by String.prototype.replace's replacement syntax.
+      const updated = original.replace(old_str, () => new_str ?? "");
       fs.writeFileSync(filePath, updated, "utf8");
 
-      // Exact success message from Claude's str_replace tool
       return {
         content: [{ type: "text" as const, text: `Successfully replaced string in ${filePath}` }],
         structuredContent: { path: filePath },
@@ -215,13 +293,12 @@ server.registerTool(
   }
 );
 
-// ─── Tool: view ──────────────────────────────────────────────────────────────
+// ─── Tool: view ───────────────────────────────────────────────────────────────
 
 server.registerTool(
   "view",
   {
     title: "View Path (File or Directory)",
-    // Exact description from Claude's view tool
     description:
       "Supports viewing text, images, and directory listings.\n\n" +
       "Supported path types:\n" +
@@ -235,12 +312,10 @@ server.registerTool(
         .describe("Why I need to view this"),
       path: z
         .string()
-        // Exact argument description from Claude's view tool
         .describe("Absolute path to file or directory, e.g. `/repo/file.py` or `/repo`."),
       view_range: z
         .tuple([z.number().int(), z.number().int()])
         .optional()
-        // Exact argument description from Claude's view tool
         .describe(
           "Optional [start_line, end_line] where lines are indexed starting at 1. Use [start_line, -1] to view from start_line to the end of the file. When not provided, the entire file is displayed, truncating from the middle if it exceeds 16,000 characters (showing beginning and end)."
         ),
@@ -254,7 +329,7 @@ server.registerTool(
   },
   async ({ path: rawPath, view_range }) => {
     const filePath = resolvePath(rawPath);
-    // Exact error message from Claude's view tool
+
     if (!fs.existsSync(filePath)) {
       return {
         content: [{ type: "text" as const, text: `Path not found: ${filePath}` }],
@@ -265,9 +340,8 @@ server.registerTool(
     try {
       const stat = fs.statSync(filePath);
 
-      // ── Directory ────────────────────────────────────────────────────────────
+      // ── Directory ──────────────────────────────────────────────────────────
       if (stat.isDirectory()) {
-        // Top-level entry first, then recurse — matches Claude's view directory output
         let listing = `${humanSize(stat.size)}\t${filePath}\n`;
         listing += listDirectory(filePath);
         return {
@@ -276,7 +350,7 @@ server.registerTool(
         };
       }
 
-      // ── Image ────────────────────────────────────────────────────────────────
+      // ── Image ──────────────────────────────────────────────────────────────
       const ext = path.extname(filePath).toLowerCase();
       const imageTypes: Record<string, string> = {
         ".jpg":  "image/jpeg",
@@ -299,43 +373,37 @@ server.registerTool(
         };
       }
 
-      // ── Text file ────────────────────────────────────────────────────────────
+      // ── Text file ──────────────────────────────────────────────────────────
       const rawBuffer = fs.readFileSync(filePath);
-
-      // Decode bytes: valid UTF-8 passes through, invalid bytes become \xNN hex escapes
-      const rawContent = Array.from(rawBuffer as unknown as number[])
-        .map((byte: number) => {
-          if (byte < 0x80) return String.fromCharCode(byte);
-          const char = Buffer.from([byte]).toString("utf8");
-          return char === "\uFFFD" ? "\\x" + byte.toString(16).padStart(2, "0") : char;
-        })
-        .join("");
-
+      const rawContent = decodeUtf8WithHexEscapes(rawBuffer);
       const lines = rawContent.split("\n");
       const totalLines = lines.length;
 
-      // ── view_range path ──────────────────────────────────────────────────────
+      // ── view_range path ────────────────────────────────────────────────────
       if (view_range) {
         const [startLine, endLineRaw] = view_range;
 
-        // Resolve -1 sentinel to actual last line
-        const endLine = endLineRaw === -1 ? totalLines : endLineRaw;
-
         // Validate: start must be ≥ 1
+        // Exact error format from Claude's view tool:
+        //   "Invalid `view_range`: First element `N` should be between 1 and M"
         if (startLine < 1) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Invalid \`view_range\`: First element \`${startLine}\` should be ≥ 1`,
+                text: `Invalid \`view_range\`: First element \`${startLine}\` should be between 1 and ${totalLines}`,
               },
             ],
             isError: true,
           };
         }
 
+        // Resolve -1 sentinel to actual last line
+        const endLine = endLineRaw === -1 ? totalLines : endLineRaw;
+
         // Validate: end must be ≥ start (after resolving -1)
-        // Exact error message from Claude's view tool
+        // Exact error format from Claude's view tool:
+        //   "Invalid `view_range`: Second element `N` should be between M and T, or -1 for end of file"
         if (endLine < startLine) {
           return {
             content: [
@@ -352,23 +420,28 @@ server.registerTool(
         const clampedEnd = Math.min(endLine, totalLines);
         const numbered = formatWithLineNumbers(lines, startLine - 1, clampedEnd);
 
-        // Exact output format from Claude's view tool (range mode)
         return {
           content: [
             {
               type: "text" as const,
+              // Exact format: numbered lines followed by "[N lines total]"
               text: `${numbered}\n[${totalLines} lines total]`,
             },
           ],
-          structuredContent: { type: "file", path: filePath, totalLines, startLine, endLine: clampedEnd },
+          structuredContent: {
+            type: "file",
+            path: filePath,
+            totalLines,
+            startLine,
+            endLine: clampedEnd,
+          },
         };
       }
 
-      // ── Full file (no view_range) ────────────────────────────────────────────
-      const CHAR_LIMIT = 16000;
+      // ── Full file (no view_range) ──────────────────────────────────────────
+      const CHAR_LIMIT = 16_000;
 
       if (rawContent.length <= CHAR_LIMIT) {
-        // Exact output: just the numbered lines, no extra header
         const numbered = formatWithLineNumbers(lines, 0, totalLines);
         return {
           content: [{ type: "text" as const, text: numbered }],
@@ -376,14 +449,20 @@ server.registerTool(
         };
       }
 
-      // Mid-truncation for large files — shows beginning and end with notice in middle
+      // ── Mid-truncation for large files ─────────────────────────────────────
+      // Shows beginning and end separated by a truncation notice in the middle.
+      // The character budget is split equally between head and tail.
       const halfLimit = Math.floor(CHAR_LIMIT / 2);
       const headChars = rawContent.slice(0, halfLimit);
       const tailChars = rawContent.slice(-halfLimit);
 
-      // Number of complete lines in the head / tail sections
-      const headLineCount  = headChars.split("\n").length - 1;
-      const tailLineStart  = totalLines - tailChars.split("\n").length + 2;
+      // Count complete lines represented in each half-window
+      // When the 8000-char slice cuts mid-line (no trailing \n), the partial line
+      // still belongs in the head — we display its full version from `lines[]`.
+      // Only subtract 1 when the slice ends exactly on a newline (the trailing item
+      // from split() would be an empty string representing the *start* of the next line).
+      const headLineCount = headChars.split("\n").length - (headChars.endsWith("\n") ? 1 : 0);
+      const tailLineStart = totalLines - tailChars.split("\n").length + 2;
 
       const headFormatted = formatWithLineNumbers(lines, 0, headLineCount);
       const tailFormatted = formatWithLineNumbers(lines, tailLineStart - 1, totalLines);
@@ -391,7 +470,8 @@ server.registerTool(
       const omittedStart = headLineCount + 1;
       const omittedEnd   = tailLineStart - 1;
 
-      // Exact truncation notice format from Claude's view tool
+      // Exact truncation notice format from Claude's view tool:
+      //   \t< truncated lines N-M >
       const text =
         headFormatted +
         `\n\t< truncated lines ${omittedStart}-${omittedEnd} >\n` +
@@ -399,7 +479,14 @@ server.registerTool(
 
       return {
         content: [{ type: "text" as const, text }],
-        structuredContent: { type: "file", path: filePath, totalLines, truncated: true, omittedStart, omittedEnd },
+        structuredContent: {
+          type: "file",
+          path: filePath,
+          totalLines,
+          truncated: true,
+          omittedStart,
+          omittedEnd,
+        },
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -411,7 +498,7 @@ server.registerTool(
   }
 );
 
-// ─── Transport ───────────────────────────────────────────────────────────────
+// ─── Transport ────────────────────────────────────────────────────────────────
 
 async function runStdio(): Promise<void> {
   const transport = new StdioServerTransport();

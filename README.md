@@ -1,67 +1,97 @@
 # filesystem-mcp-server
 
-An MCP (Model Context Protocol) server that exposes three core filesystem tools under a consistent `filesystem_` prefix.
+An MCP server that replicates Claude's built-in `view`, `str_replace`, and `create_file` tools — running on your **host machine** rather than an isolated container.
 
 ## Tools
 
-### `filesystem_write_file`
-Create or fully overwrite a file.
+### `view`
+Read files, directories, or images.
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `path` | string | ✅ | Absolute or relative path to write to |
-| `content` | string | ✅ | Full file content |
-| `description` | string | ❌ | Optional reason for creating the file |
+- **Directory**: lists entries up to 2 levels deep; skips hidden files and `node_modules`
+- **Image** (`.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`): returns base64 data
+- **Text file**: returns numbered lines (`     N\t<content>`); truncates files over 16,000 characters by showing the head and tail with a `\t< truncated lines N-M >` notice in between
+- **`view_range`**: `[start, end]` (1-based); use `-1` as end to read to EOF; beyond-EOF end is silently clamped
+- **Non-UTF-8 bytes**: invalid bytes are rendered as `\xNN` hex escapes; valid multi-byte sequences pass through correctly
+- **`~` expansion**: paths starting with `~/` resolve to the user's home directory
 
----
-
-### `filesystem_edit_file`
-Replace a unique substring within an existing file (find & replace).
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `path` | string | ✅ | Path to the file to edit |
-| `old_str` | string | ✅ | Exact substring to find (must appear exactly once) |
-| `new_str` | string | ❌ | Replacement text (defaults to `""` for deletion) |
-| `description` | string | ❌ | Optional reason for the edit |
-
----
-
-### `filesystem_read_path`
-Read a file with line numbers, or list a directory tree up to 2 levels deep.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `path` | string | ✅ | Absolute or relative path to a file or directory |
-| `view_range` | [int, int] | ❌ | `[start_line, end_line]` slice of a text file. Use `-1` for end of file. |
-
----
-
-## Running
-
-### stdio (default — for Claude Desktop / local use)
-```bash
-npm run build
-npm start
+Error messages match Claude's tool output exactly:
+```
+Path not found: <path>
+Invalid `view_range`: First element `N` should be between 1 and M
+Invalid `view_range`: Second element `N` should be between M and T, or -1 for end of file
 ```
 
-### HTTP (for remote / multi-client use)
-```bash
-TRANSPORT=http PORT=3000 npm start
-# → POST http://localhost:3000/mcp
+---
+
+### `str_replace`
+Replace a **unique** substring in a file.
+
+- `old_str` must match exactly once — zero or multiple matches are both errors
+- `new_str` defaults to `""` (omit to delete the matched string)
+- Uses a replacer function internally so `$` characters in `new_str` are never misinterpreted
+- Files are read and written as UTF-8
+
+Error messages match Claude's tool output exactly:
+```
+File not found: <path>
+String to replace not found in <path>. Use the view tool to see the current file content before retrying…
+String to replace found multiple times, must be unique
 ```
 
-## Claude Desktop Config
+---
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+### `create_file`
+Create a new file (fails if it already exists).
 
-```json
+- Parent directories are created automatically (`mkdirSync` with `{ recursive: true }`)
+- `~` expansion supported in `path`
+
+Error messages match Claude's tool output exactly:
+```
+File already exists: <path>
+```
+
+---
+
+## Differences from Claude's in-container tools
+
+| Aspect | Claude (container) | This server (host) |
+|---|---|---|
+| Filesystem scope | Sandboxed `/home/claude` | Full host filesystem |
+| `~` expansion | Not needed (fixed paths) | Expands to `os.homedir()` |
+| Image rendering | Inline in chat UI | base64 returned to client |
+
+---
+
+## Usage
+
+### stdio (default — for Claude Desktop / Claude Code)
+
+```jsonc
+// claude_desktop_config.json
 {
   "mcpServers": {
     "filesystem": {
       "command": "node",
-      "args": ["/absolute/path/to/filesystem-mcp-server/dist/index.js"]
+      "args": ["/path/to/filesystem-mcp-server/dist/index.js"]
     }
   }
 }
+```
+
+### HTTP
+
+```bash
+TRANSPORT=http PORT=3000 node dist/index.js
+# POST http://localhost:3000/mcp
+```
+
+---
+
+## Build
+
+```bash
+npm install
+npm run build   # tsc → dist/
+npm start       # node dist/index.js
 ```
