@@ -7,14 +7,13 @@ import * as os from "os";
 import * as path from "path";
 import { z } from "zod";
 
-// ─── Working directory ────────────────────────────────────────────────────────
-
-/**
- * Default base for resolving relative paths.  We use ~/.wd so the server
- * always operates from a predictable, user-owned directory.
- */
-const DEFAULT_CWD = path.join(os.homedir(), ".wd");
-fs.mkdirSync(DEFAULT_CWD, { recursive: true });
+/** Expand ~/  to the user's home directory, matching shell behaviour on the host machine. */
+function resolvePath(filePath: string): string {
+  if (filePath === "~" || filePath.startsWith("~/")) {
+    return path.join(os.homedir(), filePath.slice(1));
+  }
+  return filePath;
+}
 
 // ─── Server Setup ────────────────────────────────────────────────────────────
 
@@ -25,131 +24,72 @@ const server = new McpServer({
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Resolve and ensure path is absolute, expanding ~/ to the home directory */
-function resolvePath(filePath: string): string {
-  const expanded = filePath.startsWith("~/")
-    ? path.join(process.env.HOME ?? process.env.USERPROFILE ?? "~", filePath.slice(2))
-    : filePath;
-  return path.isAbsolute(expanded) ? expanded : path.resolve(DEFAULT_CWD, expanded);
+const IGNORED = new Set(["node_modules"]);
+
+function humanSize(bytes: number): string {
+  if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(1) + "G";
+  if (bytes >= 1_048_576)     return (bytes / 1_048_576).toFixed(1) + "M";
+  if (bytes >= 1_024)         return Math.round(bytes / 1_024) + "K";
+  return bytes + "B";
 }
 
-/** Read directory listing up to 2 levels deep */
-const IGNORED = new Set(["node_modules", "dist", "build"]);
-
-function listDirectory(dirPath: string, depth = 0, maxDepth = 2): string {
-  if (depth > maxDepth) return "";
-  const indent = "  ".repeat(depth);
+/**
+ * Recursive directory listing up to 2 levels deep.
+ * Output format matches Claude's `view` tool exactly:
+ *   <size>\t<absolute-path>
+ * Hidden entries (starting with ".") and node_modules are skipped.
+ */
+function listDirectory(dirPath: string, depth = 0): string {
+  if (depth >= 2) return "";
   let output = "";
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return "";
+  }
   for (const entry of entries) {
     if (entry.name.startsWith(".") || IGNORED.has(entry.name)) continue;
-    output += `${indent}${entry.isDirectory() ? "[dir]" : "[file]"} ${entry.name}\n`;
-    if (entry.isDirectory() && depth < maxDepth) {
-      output += listDirectory(path.join(dirPath, entry.name), depth + 1, maxDepth);
+    const fullPath = path.join(dirPath, entry.name);
+    try {
+      const stat = fs.statSync(fullPath);
+      output += `${humanSize(stat.size)}\t${fullPath}\n`;
+      if (entry.isDirectory() && depth < 1) {
+        output += listDirectory(fullPath, depth + 1);
+      }
+    } catch {
+      // skip unreadable entries
     }
   }
   return output;
 }
 
-/** Format file lines with line numbers */
-function formatWithLineNumbers(content: string, startLine?: number, endLine?: number): string {
-  const lines = content.split("\n");
-  const start = (startLine ?? 1) - 1;
-  const end = endLine !== undefined ? endLine : lines.length;
-  const slice = lines.slice(start, end);
-  return slice
-    .map((line, i) => `${String(start + i + 1).padStart(6)}\t${line}`)
+/** Format a slice of lines with padded 1-based line numbers — matches Claude's view output exactly. */
+function formatWithLineNumbers(lines: string[], startIdx: number, endIdx: number): string {
+  return lines
+    .slice(startIdx, endIdx)
+    .map((line, i) => `${String(startIdx + i + 1).padStart(6)}\t${line}`)
     .join("\n");
 }
 
-// ─── Tool: files_write ───────────────────────────────────────────────────────
+// ─── Tool: create_file ───────────────────────────────────────────────────────
 
 server.registerTool(
-  "files_write",
+  "create_file",
   {
-    title: "Write File",
-    description: `Create or overwrite a file with the given content. Missing parent directories are created automatically.
-
-Args:
-  - path: File to write to (absolute, relative, or ~/path).
-  - content: Full file content.
-
-Returns the resolved path and byte count, or an error if the write failed.
-For partial updates use files_edit.
-
-Examples:
-  - path="src/index.ts", content="console.log('hello')"
-  - path="~/project/config.json", content="{}"`,
+    title: "Create File",
+    // Exact description from Claude's create_file tool
+    description: "Create a new file with content in the container. Missing parent directories are created automatically.",
     inputSchema: {
+      description: z
+        .string()
+        .describe("Why you're creating this file. ALWAYS PROVIDE THIS PARAMETER FIRST."),
       path: z
         .string()
-        .min(1, "Path must not be empty")
-        .describe("Absolute path, relative path, or ~/path to write to"),
-      content: z
+        .describe("Path to the file to create. ALWAYS PROVIDE THIS PARAMETER SECOND."),
+      file_text: z
         .string()
-        .describe("Full content to write into the file"),
-    },
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: true,
-      openWorldHint: false,
-    },
-  },
-  async ({ path: filePath, content }) => {
-    try {
-      const resolved = resolvePath(filePath);
-      fs.mkdirSync(path.dirname(resolved), { recursive: true });
-      fs.writeFileSync(resolved, content, "utf8");
-
-      const bytes = Buffer.byteLength(content, "utf8");
-      return {
-        content: [{ type: "text" as const, text: `File written: ${resolved} (${bytes} bytes)` }],
-        structuredContent: { path: resolved, bytes },
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text" as const, text: `Error writing file: ${message}` }],
-        isError: true,
-      };
-    }
-  }
-);
-
-// ─── Tool: files_edit ────────────────────────────────────────────────────────
-
-server.registerTool(
-  "files_edit",
-  {
-    title: "Edit File (Find & Replace)",
-    description: `Find and replace a unique substring in an existing file. old_str must match the file contents exactly and appear exactly once. Omit new_str to delete the match.
-
-Args:
-  - path: File to edit (absolute, relative, or ~/path).
-  - old_str: Exact substring to find (must appear exactly once).
-  - new_str: Replacement text (default: "" to delete).
-
-Returns the resolved path and line number of the edit, or an error if not found, ambiguous, or file missing.
-For new files use files_write.
-
-Examples:
-  - old_str="fucntion", new_str="function"
-  - old_str="console.log('debug')\n", new_str="" (deletion)`,
-    inputSchema: {
-      path: z
-        .string()
-        .min(1, "Path must not be empty")
-        .describe("Absolute path, relative path, or ~/path to edit"),
-      old_str: z
-        .string()
-        .min(1, "old_str must not be empty")
-        .describe("Exact substring to find (must appear exactly once)"),
-      new_str: z
-        .string()
-        .default("")
-        .describe("Replacement text; leave empty to delete the matched substring"),
+        .describe("Content to write to the file. ALWAYS PROVIDE THIS PARAMETER LAST."),
     },
     annotations: {
       readOnlyHint: false,
@@ -158,33 +98,99 @@ Examples:
       openWorldHint: false,
     },
   },
-  async ({ path: filePath, old_str, new_str }) => {
+  async ({ path: rawPath, file_text }) => {
+    const filePath = resolvePath(rawPath);
     try {
-      const resolved = resolvePath(filePath);
-
-      if (!fs.existsSync(resolved)) {
+      // Exact error message from Claude's create_file tool
+      if (fs.existsSync(filePath)) {
         return {
-          content: [{ type: "text" as const, text: `Error: File not found: ${resolved}` }],
+          content: [{ type: "text" as const, text: `File already exists: ${filePath}` }],
           isError: true,
         };
       }
 
-      const original = fs.readFileSync(resolved, "utf8");
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, file_text, "utf8");
 
-      // Count occurrences
+      // Exact success message from Claude's create_file tool
+      return {
+        content: [{ type: "text" as const, text: `File created successfully: ${filePath}` }],
+        structuredContent: { path: filePath },
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text" as const, text: `Error creating file: ${message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ─── Tool: str_replace ───────────────────────────────────────────────────────
+
+server.registerTool(
+  "str_replace",
+  {
+    title: "Edit File (str_replace)",
+    // Exact description from Claude's str_replace tool
+    description:
+      "Replace a unique string in a file with another string. old_str must match the raw file content exactly and appear exactly once. When copying from view output, do NOT include the line number prefix (spaces + line number + tab) — it is display-only. View the file immediately before editing; after any successful str_replace, earlier view output of that file in your context is stale — re-view before further edits to the same file.",
+    inputSchema: {
+      description: z
+        .string()
+        .describe("Why I'm making this edit"),
+      path: z
+        .string()
+        .describe("Path to the file to edit"),
+      old_str: z
+        .string()
+        .describe("String to replace (must be unique in file)"),
+      new_str: z
+        .string()
+        .default("")
+        .describe("String to replace with (empty to delete)"),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  async ({ path: rawPath, old_str, new_str }) => {
+    const filePath = resolvePath(rawPath);
+    // Exact error message from Claude's str_replace tool
+    if (!fs.existsSync(filePath)) {
+      return {
+        content: [{ type: "text" as const, text: `File not found: ${filePath}` }],
+        isError: true,
+      };
+    }
+
+    try {
+      const original = fs.readFileSync(filePath, "utf8");
       const occurrences = original.split(old_str).length - 1;
+
+      // Exact error messages from Claude's str_replace tool
       if (occurrences === 0) {
         return {
-          content: [{ type: "text" as const, text: `Error: String not found in ${resolved}` }],
+          content: [
+            {
+              type: "text" as const,
+              text: `String to replace not found in ${filePath}. Use the view tool to see the current file content before retrying. If you made a successful str_replace to this file since your last view, that edit invalidated your view output.`,
+            },
+          ],
           isError: true,
         };
       }
+
       if (occurrences > 1) {
         return {
           content: [
             {
               type: "text" as const,
-              text: `Error: String appears ${occurrences} times in ${resolved}. Add more context to make it unique.`,
+              text: `String to replace found multiple times, must be unique`,
             },
           ],
           isError: true,
@@ -192,16 +198,12 @@ Examples:
       }
 
       const updated = original.replace(old_str, new_str ?? "");
-      fs.writeFileSync(resolved, updated, "utf8");
+      fs.writeFileSync(filePath, updated, "utf8");
 
-      // Report which line the change landed on
-      const linesBefore = original.slice(0, original.indexOf(old_str)).split("\n").length;
-      const linesAdded = (new_str ?? "").split("\n").length;
-      const linesRemoved = old_str.split("\n").length;
-
+      // Exact success message from Claude's str_replace tool
       return {
-        content: [{ type: "text" as const, text: `Edit applied at line ${linesBefore} in ${resolved} (+${linesAdded}/-${linesRemoved} lines)` }],
-        structuredContent: { path: resolved, line: linesBefore, linesAdded, linesRemoved },
+        content: [{ type: "text" as const, text: `Successfully replaced string in ${filePath}` }],
+        structuredContent: { path: filePath },
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -213,35 +215,34 @@ Examples:
   }
 );
 
-// ─── Tool: files_read ────────────────────────────────────────────────────────
+// ─── Tool: view ──────────────────────────────────────────────────────────────
 
 server.registerTool(
-  "files_read",
+  "view",
   {
-    title: "Read Path (File or Directory)",
-    description: `Read a file or list a directory tree (2 levels deep, including hidden files).
-
-Args:
-  - path: File or directory to read (absolute, relative, or ~/path).
-  - view_range: Optional [start_line, end_line] slice for text files. Use -1 for end of file. Ignored for directories.
-
-Returns numbered line content for text files, an image content block for images (jpg/png/gif/webp), or a tree listing for directories.
-Large text files (>16 000 chars) are mid-truncated with an omission notice — use view_range to reach hidden lines.
-Non-UTF-8 bytes are shown as hex escapes (e.g. \x84).
-
-Examples:
-  - path="src/index.ts", view_range=[1, 50]
-  - path="~/project" (directory listing)`,
+    title: "View Path (File or Directory)",
+    // Exact description from Claude's view tool
+    description:
+      "Supports viewing text, images, and directory listings.\n\n" +
+      "Supported path types:\n" +
+      "- Directories: Lists files and directories up to 2 levels deep, ignoring hidden items and node_modules\n" +
+      "- Image files (.jpg, .jpeg, .png, .gif, .webp): Displays the image visually\n" +
+      "- Text files: Displays numbered lines (prefix `    N\\t` is display-only — do not include it in str_replace's `old_str`). You can optionally specify a view_range to see specific lines.\n\n" +
+      "Note: Files with non-UTF-8 encoding will display hex escapes (e.g. \\x84) for invalid bytes",
     inputSchema: {
+      description: z
+        .string()
+        .describe("Why I need to view this"),
       path: z
         .string()
-        .min(1, "Path must not be empty")
-        .describe("Absolute path, relative path, or ~/path to a file or directory"),
+        // Exact argument description from Claude's view tool
+        .describe("Absolute path to file or directory, e.g. `/repo/file.py` or `/repo`."),
       view_range: z
         .tuple([z.number().int(), z.number().int()])
         .optional()
+        // Exact argument description from Claude's view tool
         .describe(
-          "Optional [start_line, end_line] range (1-indexed). Use -1 for end_line to read to EOF."
+          "Optional [start_line, end_line] where lines are indexed starting at 1. Use [start_line, -1] to view from start_line to the end of the file. When not provided, the entire file is displayed, truncating from the middle if it exceeds 16,000 characters (showing beginning and end)."
         ),
     },
     annotations: {
@@ -251,121 +252,154 @@ Examples:
       openWorldHint: false,
     },
   },
-  async ({ path: filePath, view_range }) => {
+  async ({ path: rawPath, view_range }) => {
+    const filePath = resolvePath(rawPath);
+    // Exact error message from Claude's view tool
+    if (!fs.existsSync(filePath)) {
+      return {
+        content: [{ type: "text" as const, text: `Path not found: ${filePath}` }],
+        isError: true,
+      };
+    }
+
     try {
-      const resolved = resolvePath(filePath);
+      const stat = fs.statSync(filePath);
 
-      if (!fs.existsSync(resolved)) {
-        return {
-          content: [{ type: "text" as const, text: `Error: Path not found: ${resolved}` }],
-          isError: true,
-        };
-      }
-
-      const stat = fs.statSync(resolved);
-
-      // Directory listing
+      // ── Directory ────────────────────────────────────────────────────────────
       if (stat.isDirectory()) {
-        const listing = listDirectory(resolved);
+        // Top-level entry first, then recurse — matches Claude's view directory output
+        let listing = `${humanSize(stat.size)}\t${filePath}\n`;
+        listing += listDirectory(filePath);
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Directory: ${resolved}\n\n${listing || "(empty directory)"}`,
-            },
-          ],
-          structuredContent: { type: "directory", path: resolved },
+          content: [{ type: "text" as const, text: listing.trimEnd() }],
+          structuredContent: { type: "directory", path: filePath },
         };
       }
 
-      // Image files
-      const ext = path.extname(resolved).toLowerCase();
+      // ── Image ────────────────────────────────────────────────────────────────
+      const ext = path.extname(filePath).toLowerCase();
       const imageTypes: Record<string, string> = {
-        ".jpg": "image/jpeg",
+        ".jpg":  "image/jpeg",
         ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".gif": "image/gif",
+        ".png":  "image/png",
+        ".gif":  "image/gif",
         ".webp": "image/webp",
       };
-
       if (imageTypes[ext]) {
-        const data = fs.readFileSync(resolved);
-        const b64 = data.toString("base64");
+        const data = fs.readFileSync(filePath);
         return {
           content: [
             {
               type: "image" as const,
-              data: b64,
+              data: data.toString("base64"),
               mimeType: imageTypes[ext],
             },
           ],
-          structuredContent: { type: "image", path: resolved, mimeType: imageTypes[ext] },
+          structuredContent: { type: "image", path: filePath, mimeType: imageTypes[ext] },
         };
       }
 
-      // Text files
-      const CHAR_LIMIT = 16000;
-      const rawBuffer = fs.readFileSync(resolved);
-      const rawContent = Array.from(rawBuffer).map((byte: number) => {
-        if (byte < 0x80) return String.fromCharCode(byte);
-        const char = Buffer.from([byte]).toString("utf8");
-        return char === "\uFFFD" ? "\\x" + byte.toString(16).padStart(2, "0") : char;
-      }).join("");
-      const totalLines = rawContent.split("\n").length;
-      let startLine: number | undefined;
-      let endLine: number | undefined;
+      // ── Text file ────────────────────────────────────────────────────────────
+      const rawBuffer = fs.readFileSync(filePath);
 
+      // Decode bytes: valid UTF-8 passes through, invalid bytes become \xNN hex escapes
+      const rawContent = Array.from(rawBuffer as unknown as number[])
+        .map((byte: number) => {
+          if (byte < 0x80) return String.fromCharCode(byte);
+          const char = Buffer.from([byte]).toString("utf8");
+          return char === "\uFFFD" ? "\\x" + byte.toString(16).padStart(2, "0") : char;
+        })
+        .join("");
+
+      const lines = rawContent.split("\n");
+      const totalLines = lines.length;
+
+      // ── view_range path ──────────────────────────────────────────────────────
       if (view_range) {
-        startLine = view_range[0];
-        endLine = view_range[1] === -1 ? totalLines : view_range[1];
+        const [startLine, endLineRaw] = view_range;
+
+        // Resolve -1 sentinel to actual last line
+        const endLine = endLineRaw === -1 ? totalLines : endLineRaw;
+
+        // Validate: start must be ≥ 1
+        if (startLine < 1) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Invalid \`view_range\`: First element \`${startLine}\` should be ≥ 1`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // Validate: end must be ≥ start (after resolving -1)
+        // Exact error message from Claude's view tool
+        if (endLine < startLine) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Invalid \`view_range\`: Second element \`${endLineRaw}\` should be between ${startLine} and ${totalLines}, or -1 for end of file`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // Clamp end to actual file length (beyond-EOF request → silently clamp)
+        const clampedEnd = Math.min(endLine, totalLines);
+        const numbered = formatWithLineNumbers(lines, startLine - 1, clampedEnd);
+
+        // Exact output format from Claude's view tool (range mode)
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${numbered}\n[${totalLines} lines total]`,
+            },
+          ],
+          structuredContent: { type: "file", path: filePath, totalLines, startLine, endLine: clampedEnd },
+        };
       }
 
-      const sliced = startLine || endLine
-        ? formatWithLineNumbers(rawContent, startLine, endLine)
-        : null;
+      // ── Full file (no view_range) ────────────────────────────────────────────
+      const CHAR_LIMIT = 16000;
 
-      // Apply mid-truncation when no range is specified and content is large
-      let numbered: string;
-      let truncated = false;
-      if (sliced !== null) {
-        numbered = sliced;
-      } else if (rawContent.length <= CHAR_LIMIT) {
-        numbered = formatWithLineNumbers(rawContent);
-      } else {
-        const halfLimit = Math.floor(CHAR_LIMIT / 2);
-        const headContent = rawContent.slice(0, halfLimit);
-        const tailContent = rawContent.slice(-halfLimit);
-        const headLines = headContent.split("\n").length;
-        const tailStartLine = totalLines - tailContent.split("\n").length + 1;
-        numbered =
-          formatWithLineNumbers(rawContent, 1, headLines) +
-          `\n\n... [${totalLines - headLines - (totalLines - tailStartLine + 1)} lines omitted — use view_range to read them] ...\n\n` +
-          formatWithLineNumbers(rawContent, tailStartLine, totalLines);
-        truncated = true;
+      if (rawContent.length <= CHAR_LIMIT) {
+        // Exact output: just the numbered lines, no extra header
+        const numbered = formatWithLineNumbers(lines, 0, totalLines);
+        return {
+          content: [{ type: "text" as const, text: numbered }],
+          structuredContent: { type: "file", path: filePath, totalLines, truncated: false },
+        };
       }
 
-      const rangeNote =
-        startLine && endLine
-          ? ` (lines ${startLine}–${endLine} of ${totalLines})`
-          : truncated
-          ? ` (${totalLines} lines, truncated — middle omitted)`
-          : ` (${totalLines} lines)`;
+      // Mid-truncation for large files — shows beginning and end with notice in middle
+      const halfLimit = Math.floor(CHAR_LIMIT / 2);
+      const headChars = rawContent.slice(0, halfLimit);
+      const tailChars = rawContent.slice(-halfLimit);
+
+      // Number of complete lines in the head / tail sections
+      const headLineCount  = headChars.split("\n").length - 1;
+      const tailLineStart  = totalLines - tailChars.split("\n").length + 2;
+
+      const headFormatted = formatWithLineNumbers(lines, 0, headLineCount);
+      const tailFormatted = formatWithLineNumbers(lines, tailLineStart - 1, totalLines);
+
+      const omittedStart = headLineCount + 1;
+      const omittedEnd   = tailLineStart - 1;
+
+      // Exact truncation notice format from Claude's view tool
+      const text =
+        headFormatted +
+        `\n\t< truncated lines ${omittedStart}-${omittedEnd} >\n` +
+        tailFormatted;
 
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: `File: ${resolved}${rangeNote}\n\n${numbered}`,
-          },
-        ],
-        structuredContent: {
-          type: "file",
-          path: resolved,
-          totalLines,
-          truncated,
-          startLine: startLine ?? 1,
-          endLine: endLine ?? totalLines,
-        },
+        content: [{ type: "text" as const, text }],
+        structuredContent: { type: "file", path: filePath, totalLines, truncated: true, omittedStart, omittedEnd },
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
