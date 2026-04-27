@@ -302,14 +302,27 @@ server.registerTool(
       // ── Text file ────────────────────────────────────────────────────────────
       const rawBuffer = fs.readFileSync(filePath);
 
-      // Decode bytes: valid UTF-8 passes through, invalid bytes become \xNN hex escapes
-      const rawContent = Array.from(rawBuffer as unknown as number[])
-        .map((byte: number) => {
-          if (byte < 0x80) return String.fromCharCode(byte);
-          const char = Buffer.from([byte]).toString("utf8");
-          return char === "\uFFFD" ? "\\x" + byte.toString(16).padStart(2, "0") : char;
-        })
-        .join("");
+      // Decode bytes: valid UTF-8 passes through, invalid bytes become \xNN hex escapes.
+      // We decode the whole buffer at once so multi-byte sequences (e.g. ─ = 0xE2 0x94 0x80)
+      // are handled correctly. Replacement characters (\uFFFD) in the decoded string indicate
+      // bytes that were genuinely invalid in UTF-8; we re-encode those positions back to \xNN.
+      const decoded = rawBuffer.toString("utf8");
+      const rawContent = decoded.replace(/\uFFFD/g, (_, offset) => {
+        // Find the raw byte(s) at this position in the original buffer that caused the replacement.
+        // Walk the buffer to map the character offset back to a byte offset.
+        let byteOffset = 0;
+        let charOffset = 0;
+        while (charOffset < offset && byteOffset < rawBuffer.length) {
+          const b = rawBuffer[byteOffset];
+          // Determine the byte length of the UTF-8 sequence starting here.
+          const seqLen = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
+          byteOffset += seqLen;
+          charOffset++;
+        }
+        // Emit \xNN for each byte of the invalid sequence (typically just 1 byte).
+        const b = rawBuffer[byteOffset];
+        return "\\x" + b.toString(16).padStart(2, "0");
+      });
 
       const lines = rawContent.split("\n");
       const totalLines = lines.length;
