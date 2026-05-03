@@ -37,6 +37,21 @@ Read a file with line numbers, or list a directory tree up to 2 levels deep.
 
 ---
 
+## Configuration
+
+### Working Directory
+
+Set `WORKING_DIR` in the `env` block of your MCP config to control which directory relative paths resolve against. Supports `~` expansion.
+
+**Default:** `process.cwd()` (wherever `node` is launched from — often unpredictable inside MCP clients).
+
+**Behaviour:**
+- **Relative paths** (e.g. `src/index.ts`) → resolved relative to `WORKING_DIR`
+- **Absolute paths** (e.g. `/etc/hosts`) → used as-is, unaffected
+- **`~` paths** (e.g. `~/notes.md`) → expanded to the home directory, unaffected
+
+---
+
 ## Running
 
 ### stdio (default — for Claude Desktop / local use)
@@ -51,9 +66,39 @@ TRANSPORT=http PORT=3000 npm start
 # → POST http://localhost:3000/mcp
 ```
 
+---
+
 ## Claude Desktop Config
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "node",
+      "args": ["/absolute/path/to/filesystem-mcp-server/dist/index.js"],
+      "env": {
+        "WORKING_DIR": "/home/alice/my-project"
+      }
+    }
+  }
+}
+```
+
+With this config, a tool call using `path: "src/index.ts"` will resolve to `/home/alice/my-project/src/index.ts`.
+
+### Tilde expansion
+
+```json
+"env": {
+  "WORKING_DIR": "~/projects/my-app"
+}
+```
+
+`~` is expanded to the home directory of the user running the server process.
+
+### No `WORKING_DIR` set
 
 ```json
 {
@@ -65,3 +110,5 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   }
 }
 ```
+
+Relative paths resolve against `process.cwd()`. For MCP clients that launch the server from an arbitrary directory, **always prefer setting `WORKING_DIR` explicitly.**

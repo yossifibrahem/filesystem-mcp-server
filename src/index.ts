@@ -7,12 +7,33 @@ import * as os from "os";
 import * as path from "path";
 import { z } from "zod";
 
-/** Expand ~/  to the user's home directory, matching shell behaviour on the host machine. */
+/**
+ * Resolve the configured working directory (from WORKING_DIR env var).
+ * Supports ~ expansion, falls back to process.cwd() when unset.
+ */
+function resolveWorkingDir(): string {
+  const raw = process.env.WORKING_DIR;
+  if (!raw) return process.cwd();
+  if (raw === "~" || raw.startsWith("~/")) {
+    return path.join(os.homedir(), raw.slice(1));
+  }
+  return path.resolve(raw);
+}
+
+/** Absolute base directory used to anchor all relative paths. */
+const WORKING_DIR = resolveWorkingDir();
+
+/**
+ * Expand ~/ to the user's home directory, then resolve the result against
+ * WORKING_DIR so that relative paths are anchored to the configured root.
+ */
 function resolvePath(filePath: string): string {
   if (filePath === "~" || filePath.startsWith("~/")) {
     return path.join(os.homedir(), filePath.slice(1));
   }
-  return filePath;
+  // path.resolve treats absolute paths as-is and resolves relative ones
+  // against WORKING_DIR instead of process.cwd().
+  return path.resolve(WORKING_DIR, filePath);
 }
 
 // ─── Server Setup ────────────────────────────────────────────────────────────
@@ -303,23 +324,16 @@ server.registerTool(
       const rawBuffer = fs.readFileSync(filePath);
 
       // Decode bytes: valid UTF-8 passes through, invalid bytes become \xNN hex escapes.
-      // We decode the whole buffer at once so multi-byte sequences (e.g. ─ = 0xE2 0x94 0x80)
-      // are handled correctly. Replacement characters (\uFFFD) in the decoded string indicate
-      // bytes that were genuinely invalid in UTF-8; we re-encode those positions back to \xNN.
       const decoded = rawBuffer.toString("utf8");
       const rawContent = decoded.replace(/\uFFFD/g, (_, offset) => {
-        // Find the raw byte(s) at this position in the original buffer that caused the replacement.
-        // Walk the buffer to map the character offset back to a byte offset.
         let byteOffset = 0;
         let charOffset = 0;
         while (charOffset < offset && byteOffset < rawBuffer.length) {
           const b = rawBuffer[byteOffset];
-          // Determine the byte length of the UTF-8 sequence starting here.
           const seqLen = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
           byteOffset += seqLen;
           charOffset++;
         }
-        // Emit \xNN for each byte of the invalid sequence (typically just 1 byte).
         const b = rawBuffer[byteOffset];
         return "\\x" + b.toString(16).padStart(2, "0");
       });
@@ -330,11 +344,8 @@ server.registerTool(
       // ── view_range path ──────────────────────────────────────────────────────
       if (view_range) {
         const [startLine, endLineRaw] = view_range;
-
-        // Resolve -1 sentinel to actual last line
         const endLine = endLineRaw === -1 ? totalLines : endLineRaw;
 
-        // Validate: start must be ≥ 1
         if (startLine < 1) {
           return {
             content: [
@@ -347,8 +358,6 @@ server.registerTool(
           };
         }
 
-        // Validate: end must be ≥ start (after resolving -1)
-        // Exact error message from Claude's view tool
         if (endLine < startLine) {
           return {
             content: [
@@ -361,11 +370,9 @@ server.registerTool(
           };
         }
 
-        // Clamp end to actual file length (beyond-EOF request → silently clamp)
         const clampedEnd = Math.min(endLine, totalLines);
         const numbered = formatWithLineNumbers(lines, startLine - 1, clampedEnd);
 
-        // Exact output format from Claude's view tool (range mode)
         return {
           content: [
             {
@@ -381,7 +388,6 @@ server.registerTool(
       const CHAR_LIMIT = 16000;
 
       if (rawContent.length <= CHAR_LIMIT) {
-        // Exact output: just the numbered lines, no extra header
         const numbered = formatWithLineNumbers(lines, 0, totalLines);
         return {
           content: [{ type: "text" as const, text: numbered }],
@@ -389,12 +395,11 @@ server.registerTool(
         };
       }
 
-      // Mid-truncation for large files — shows beginning and end with notice in middle
+      // Mid-truncation for large files
       const halfLimit = Math.floor(CHAR_LIMIT / 2);
       const headChars = rawContent.slice(0, halfLimit);
       const tailChars = rawContent.slice(-halfLimit);
 
-      // Number of complete lines in the head / tail sections
       const headLineCount  = headChars.split("\n").length - 1;
       const tailLineStart  = totalLines - tailChars.split("\n").length + 2;
 
@@ -404,7 +409,6 @@ server.registerTool(
       const omittedStart = headLineCount + 1;
       const omittedEnd   = tailLineStart - 1;
 
-      // Exact truncation notice format from Claude's view tool
       const text =
         headFormatted +
         `\n\t< truncated lines ${omittedStart}-${omittedEnd} >\n` +
@@ -429,7 +433,7 @@ server.registerTool(
 async function runStdio(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("filesystem-mcp-server running on stdio");
+  console.error(`filesystem-mcp-server running on stdio (working dir: ${WORKING_DIR})`);
 }
 
 async function runHTTP(): Promise<void> {
@@ -448,7 +452,7 @@ async function runHTTP(): Promise<void> {
 
   const port = parseInt(process.env.PORT ?? "3000");
   app.listen(port, () => {
-    console.error(`filesystem-mcp-server running on http://localhost:${port}/mcp`);
+    console.error(`filesystem-mcp-server running on http://localhost:${port}/mcp (working dir: ${WORKING_DIR})`);
   });
 }
 
