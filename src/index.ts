@@ -36,12 +36,22 @@ function resolvePath(filePath: string): string {
   return path.resolve(WORKING_DIR, filePath);
 }
 
-// ─── Server Setup ────────────────────────────────────────────────────────────
+// ─── Server Factory ───────────────────────────────────────────────────────────
+//
+// BUG FIX: The original code created a single McpServer singleton and called
+// server.connect(transport) inside the HTTP request handler — once per request.
+// The MCP SDK is not designed for a server instance to be connected to multiple
+// transports, and after the first request the SDK throws or silently misbehaves.
+//
+// The correct pattern for stateless HTTP (sessionIdGenerator: undefined) is to
+// create a fresh McpServer per request so each transport gets its own instance.
+// For stdio, a single call to createServer() is still sufficient.
 
-const server = new McpServer({
-  name: "filesystem-mcp-server",
-  version: "1.0.0",
-});
+function createServer(): McpServer {
+  const server = new McpServer({
+    name: "filesystem-mcp-server",
+    version: "1.0.0",
+  });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -218,7 +228,11 @@ server.registerTool(
         };
       }
 
-      const updated = original.replace(old_str, new_str ?? "");
+      // BUG FIX: String.prototype.replace(string, string) interprets special
+      // replacement patterns in the second argument ($&, $', $`, $1, etc.).
+      // Using a replacer function bypasses this so new_str is always literal.
+      const replacement = new_str ?? "";
+      const updated = original.replace(old_str, () => replacement);
       fs.writeFileSync(filePath, updated, "utf8");
 
       // Exact success message from Claude's str_replace tool
@@ -323,20 +337,50 @@ server.registerTool(
       // ── Text file ────────────────────────────────────────────────────────────
       const rawBuffer = fs.readFileSync(filePath);
 
-      // Decode bytes: valid UTF-8 passes through, invalid bytes become \xNN hex escapes.
-      const decoded = rawBuffer.toString("utf8");
-      const rawContent = decoded.replace(/\uFFFD/g, (_, offset) => {
-        let byteOffset = 0;
-        let charOffset = 0;
-        while (charOffset < offset && byteOffset < rawBuffer.length) {
-          const b = rawBuffer[byteOffset];
-          const seqLen = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
-          byteOffset += seqLen;
-          charOffset++;
+      // BUG FIX: The original approach decoded to a UTF-8 string and then tried
+      // to back-track from U+FFFD replacement-character positions to the original
+      // byte offsets. That is broken in two ways:
+      //   1. The replacer callback receives the *character* index in the decoded
+      //      JS string, but the loop treated it as a *byte* index.
+      //   2. The seqLen heuristic (b < 0x80 ? 1 : b < 0xE0 ? 2 …) misclassifies
+      //      continuation bytes (0x80–0xBF) as 2-byte lead bytes, producing wrong
+      //      byte offsets and therefore wrong \xNN values.
+      //
+      // Correct approach: walk the raw buffer once, validating each UTF-8
+      // sequence explicitly. Valid sequences are emitted as text; any invalid
+      // lead byte or truncated sequence is escaped as \xNN (one byte at a time).
+      let rawContent = "";
+      let bi = 0;
+      while (bi < rawBuffer.length) {
+        const b0 = rawBuffer[bi];
+        // ASCII — fast path
+        if (b0 < 0x80) { rawContent += String.fromCharCode(b0); bi++; continue; }
+        // Determine expected sequence length from lead byte
+        let seqLen: number;
+        if      ((b0 & 0xE0) === 0xC0) seqLen = 2;
+        else if ((b0 & 0xF0) === 0xE0) seqLen = 3;
+        else if ((b0 & 0xF8) === 0xF0) seqLen = 4;
+        else {
+          // Lone continuation byte or invalid lead byte (0xF8–0xFF)
+          rawContent += "\\x" + b0.toString(16).padStart(2, "0");
+          bi++;
+          continue;
         }
-        const b = rawBuffer[byteOffset];
-        return "\\x" + b.toString(16).padStart(2, "0");
-      });
+        // Verify all expected continuation bytes are present and well-formed
+        let valid = bi + seqLen <= rawBuffer.length;
+        if (valid) {
+          for (let ci = 1; ci < seqLen; ci++) {
+            if ((rawBuffer[bi + ci] & 0xC0) !== 0x80) { valid = false; break; }
+          }
+        }
+        if (valid) {
+          rawContent += rawBuffer.slice(bi, bi + seqLen).toString("utf8");
+          bi += seqLen;
+        } else {
+          rawContent += "\\x" + b0.toString(16).padStart(2, "0");
+          bi++;
+        }
+      }
 
       const lines = rawContent.split("\n");
       const totalLines = lines.length;
@@ -400,13 +444,19 @@ server.registerTool(
       const headChars = rawContent.slice(0, halfLimit);
       const tailChars = rawContent.slice(-halfLimit);
 
-      const headLineCount  = headChars.split("\n").length - 1;
-      const tailLineStart  = totalLines - tailChars.split("\n").length + 2;
+      const headLineCount = headChars.split("\n").length - 1;
+      const tailLineStart = totalLines - tailChars.split("\n").length + 2;
 
-      const headFormatted = formatWithLineNumbers(lines, 0, headLineCount);
+      // BUG FIX: When individual lines are very long (longer than halfLimit) the
+      // two windows can overlap, causing headLineCount >= tailLineStart and
+      // producing duplicate or out-of-order output.  Clamp so the tail always
+      // starts strictly after the head.
+      const safeHeadLineCount = Math.min(headLineCount, tailLineStart - 1);
+
+      const headFormatted = formatWithLineNumbers(lines, 0, safeHeadLineCount);
       const tailFormatted = formatWithLineNumbers(lines, tailLineStart - 1, totalLines);
 
-      const omittedStart = headLineCount + 1;
+      const omittedStart = safeHeadLineCount + 1;
       const omittedEnd   = tailLineStart - 1;
 
       const text =
@@ -428,11 +478,14 @@ server.registerTool(
   }
 );
 
+  return server;
+}
+
 // ─── Transport ───────────────────────────────────────────────────────────────
 
 async function runStdio(): Promise<void> {
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await createServer().connect(transport);
   console.error(`filesystem-mcp-server running on stdio (working dir: ${WORKING_DIR})`);
 }
 
@@ -446,7 +499,8 @@ async function runHTTP(): Promise<void> {
       enableJsonResponse: true,
     });
     res.on("close", () => transport.close());
-    await server.connect(transport);
+    // Create a fresh server instance for each stateless request
+    await createServer().connect(transport);
     await transport.handleRequest(req, res, req.body);
   });
 
