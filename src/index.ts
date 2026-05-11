@@ -200,7 +200,12 @@ server.registerTool(
     }
 
     try {
-      const original = fs.readFileSync(filePath, "utf8");
+      const raw = fs.readFileSync(filePath, "utf8");
+      // BUG FIX: Files with Windows CRLF (\r\n) line endings never matched
+      // when old_str was typed or generated with Unix LF (\n) — the most
+      // common case. Normalise to LF on read and write back LF so str_replace
+      // works regardless of the original line-ending style.
+      const original = raw.replace(/\r\n/g, "\n");
       const occurrences = original.split(old_str).length - 1;
 
       // Exact error messages from Claude's str_replace tool
