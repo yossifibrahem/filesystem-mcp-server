@@ -7,33 +7,12 @@ import * as os from "os";
 import * as path from "path";
 import { z } from "zod";
 
-/**
- * Resolve the configured working directory (from WORKING_DIR env var).
- * Supports ~ expansion, falls back to process.cwd() when unset.
- */
-function resolveWorkingDir(): string {
-  const raw = process.env.WORKING_DIR;
-  if (!raw) return process.cwd();
-  if (raw === "~" || raw.startsWith("~/")) {
-    return path.join(os.homedir(), raw.slice(1));
-  }
-  return path.resolve(raw);
-}
-
-/** Absolute base directory used to anchor all relative paths. */
-const WORKING_DIR = resolveWorkingDir();
-
-/**
- * Expand ~/ to the user's home directory, then resolve the result against
- * WORKING_DIR so that relative paths are anchored to the configured root.
- */
+/** Resolve a path. ~/... paths are expanded to the home directory; absolute paths are used as-is. */
 function resolvePath(filePath: string): string {
   if (filePath === "~" || filePath.startsWith("~/")) {
     return path.join(os.homedir(), filePath.slice(1));
   }
-  // path.resolve treats absolute paths as-is and resolves relative ones
-  // against WORKING_DIR instead of process.cwd().
-  return path.resolve(WORKING_DIR, filePath);
+  return filePath;
 }
 
 // ─── Server Factory ───────────────────────────────────────────────────────────
@@ -63,6 +42,34 @@ function humanSize(bytes: number): string {
   if (bytes >= 1_024)         return Math.round(bytes / 1_024) + "K";
   return bytes + "B";
 }
+
+/**
+ * Recursively sum the sizes of all files under a directory.
+ * Matches the total shown by Claude's `view` tool (e.g. "2.9G\t/home/claude").
+ */
+function dirTotalSize(dirPath: string): number {
+  let total = 0;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return total;
+  }
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    try {
+      if (entry.isDirectory()) {
+        total += dirTotalSize(fullPath);
+      } else {
+        total += fs.statSync(fullPath).size;
+      }
+    } catch {
+      // skip unreadable entries
+    }
+  }
+  return total;
+}
+
 
 /**
  * Recursive directory listing up to 2 levels deep.
@@ -131,8 +138,13 @@ server.registerTool(
   },
   async ({ path: rawPath, file_text }) => {
     const filePath = resolvePath(rawPath);
+    if (!path.isAbsolute(filePath)) {
+      return {
+        content: [{ type: "text" as const, text: `${rawPath} is not an absolute path. Run \`realpath ${rawPath}\` to get the absolute path, then create that.` }],
+        isError: true,
+      };
+    }
     try {
-      // Exact error message from Claude's create_file tool
       if (fs.existsSync(filePath)) {
         return {
           content: [{ type: "text" as const, text: `File already exists: ${filePath}` }],
@@ -191,10 +203,23 @@ server.registerTool(
   },
   async ({ path: rawPath, old_str, new_str }) => {
     const filePath = resolvePath(rawPath);
+    if (!path.isAbsolute(filePath)) {
+      return {
+        content: [{ type: "text" as const, text: `${rawPath} is not an absolute path. Run \`realpath ${rawPath}\` to get the absolute path, then edit that.` }],
+        isError: true,
+      };
+    }
     // Exact error message from Claude's str_replace tool
     if (!fs.existsSync(filePath)) {
       return {
         content: [{ type: "text" as const, text: `File not found: ${filePath}` }],
+        isError: true,
+      };
+    }
+
+    if (fs.statSync(filePath).isDirectory()) {
+      return {
+        content: [{ type: "text" as const, text: `Cannot read file: ${filePath}` }],
         isError: true,
       };
     }
@@ -294,6 +319,12 @@ server.registerTool(
   },
   async ({ path: rawPath, view_range }) => {
     const filePath = resolvePath(rawPath);
+    if (!path.isAbsolute(filePath)) {
+      return {
+        content: [{ type: "text" as const, text: `${rawPath} is not an absolute path. Run \`realpath ${rawPath}\` to get the absolute path, then view that.` }],
+        isError: true,
+      };
+    }
     // Exact error message from Claude's view tool
     if (!fs.existsSync(filePath)) {
       return {
@@ -307,8 +338,14 @@ server.registerTool(
 
       // ── Directory ────────────────────────────────────────────────────────────
       if (stat.isDirectory()) {
-        // Top-level entry first, then recurse — matches Claude's view directory output
-        let listing = `${humanSize(stat.size)}\t${filePath}\n`;
+        if (view_range) {
+          return {
+            content: [{ type: "text" as const, text: "The `view_range` parameter is not allowed when `path` points to a directory." }],
+            isError: true,
+          };
+        }
+        // Top-level entry uses recursive total size — matches Claude's view directory output
+        let listing = `${humanSize(dirTotalSize(filePath))}\t${filePath}\n`;
         listing += listDirectory(filePath);
         return {
           content: [{ type: "text" as const, text: listing.trimEnd() }],
@@ -395,12 +432,12 @@ server.registerTool(
         const [startLine, endLineRaw] = view_range;
         const endLine = endLineRaw === -1 ? totalLines : endLineRaw;
 
-        if (startLine < 1) {
+        if (startLine < 1 || startLine > totalLines) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Invalid \`view_range\`: First element \`${startLine}\` should be ≥ 1`,
+                text: `Invalid \`view_range\`: First element \`${startLine}\` should be between 1 and ${totalLines}`,
               },
             ],
             isError: true,
@@ -491,7 +528,7 @@ server.registerTool(
 async function runStdio(): Promise<void> {
   const transport = new StdioServerTransport();
   await createServer().connect(transport);
-  console.error(`filesystem-mcp-server running on stdio (working dir: ${WORKING_DIR})`);
+  console.error("filesystem-mcp-server running on stdio");
 }
 
 async function runHTTP(): Promise<void> {
@@ -511,7 +548,7 @@ async function runHTTP(): Promise<void> {
 
   const port = parseInt(process.env.PORT ?? "3000");
   app.listen(port, () => {
-    console.error(`filesystem-mcp-server running on http://localhost:${port}/mcp (working dir: ${WORKING_DIR})`);
+    console.error(`filesystem-mcp-server running on http://localhost:${port}/mcp`);
   });
 }
 

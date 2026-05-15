@@ -70,17 +70,6 @@ npm run build   # compiles TypeScript → dist/
 
 Add to your MCP client config. The path to `node` and the server's `dist/index.js` must be absolute.
 
-### Working Directory
-
-Set `WORKING_DIR` in the `env` block to control which directory relative paths resolve against. Supports `~` expansion.
-
-**Default:** `process.cwd()` (wherever `node` is launched from — often unpredictable inside MCP clients). **Always set `WORKING_DIR` explicitly for reproducible behaviour.**
-
-**Behaviour:**
-- **Relative paths** (e.g. `src/index.ts`) → resolved relative to `WORKING_DIR`
-- **Absolute paths** (e.g. `/etc/hosts`) → used as-is, unaffected
-- **`~` paths** (e.g. `~/notes.md`) → expanded to the home directory, unaffected
-
 ### Claude Desktop (`claude_desktop_config.json`)
 
 ```json
@@ -89,32 +78,6 @@ Set `WORKING_DIR` in the `env` block to control which directory relative paths r
     "filesystem": {
       "command": "node",
       "args": ["/absolute/path/to/filesystem-mcp-server-main/dist/index.js"],
-      "env": {
-        "WORKING_DIR": "/home/alice/my-project"
-      }
-    }
-  }
-}
-```
-
-With this config, a tool call using `path: "src/index.ts"` will resolve to `/home/alice/my-project/src/index.ts`.
-
-With tilde expansion:
-```json
-"env": {
-  "WORKING_DIR": "~/projects/my-app"
-}
-```
-
-`~` is expanded to the home directory of the user running the server process.
-
-Without `WORKING_DIR` (falls back to `process.cwd()`):
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "node",
-      "args": ["/absolute/path/to/filesystem-mcp-server-main/dist/index.js"]
     }
   }
 }
@@ -133,9 +96,6 @@ Config file locations:
       "command": "node",
       "args": ["/absolute/path/to/filesystem-mcp-server-main/dist/index.js"],
       "type": "stdio",
-      "env": {
-        "WORKING_DIR": "~/projects/my-app"
-      }
     }
   }
 }
@@ -157,7 +117,7 @@ TRANSPORT=http PORT=3000 npm start
 # → POST http://localhost:3000/mcp
 ```
 
-The `PORT` env var controls which port to listen on (default: `3000`). `WORKING_DIR` is respected in both modes.
+The `PORT` env var controls which port to listen on (default: `3000`).
 
 ---
 
